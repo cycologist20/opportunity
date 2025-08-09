@@ -1,0 +1,28 @@
+[project]
+name = "ok-mvp"
+version = "0.1.0"
+description = "Wizards Toolkit MVP (CLI)"
+authors = [
+    {name = "James Younkin",email = "cycologist20@gmail.com"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "yt-dlp (>=2025.7.21,<2026.0.0)",
+    "youtube-transcript-api (>=1.2.2,<2.0.0)",
+    "python-dotenv (>=1.1.1,<2.0.0)",
+    "arxiv (>=2.2.0,<3.0.0)",
+    "pypdf (>=5.9.0,<6.0.0)",
+    "openai (>=1.99.6,<2.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.group.dev.dependencies]
+black = "^25.1.0"
+ruff = "^0.12.8"
+
