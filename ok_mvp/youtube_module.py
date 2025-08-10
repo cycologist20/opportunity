@@ -26,12 +26,81 @@ from .llm_utils import chunk_text, call_llm
 logger = get_logger()
 
 
+def _create_opportunities_prompt(num_sources: int) -> str:
+    """Create a prompt that instructs the LLM to generate opportunities with source references."""
+    return f"""Analyze the following YouTube video transcripts and identify actionable business opportunities.
+
+Each transcript is labeled with [SOURCE X] where X is a number from 0 to {num_sources-1}.
+
+For each opportunity you identify, you MUST:
+1. Provide a clear, concise idea (1-2 sentences)
+2. Provide a detailed description explaining the opportunity (2-3 sentences)
+3. List the specific source numbers that support this opportunity
+
+Format your response EXACTLY as follows:
+
+OPPORTUNITY 1:
+IDEA: [Brief opportunity statement]
+DESCRIPTION: [Detailed explanation of the opportunity]
+SOURCES: [comma-separated list of source numbers, e.g., 0,2,4]
+
+OPPORTUNITY 2:
+IDEA: [Brief opportunity statement]
+DESCRIPTION: [Detailed explanation of the opportunity]
+SOURCES: [comma-separated list of source numbers, e.g., 1,3]
+
+Continue this pattern for all opportunities you identify. Be specific about which sources support each opportunity."""
+
+
+def _parse_opportunities_response(llm_response: str) -> List[Dict]:
+    """Parse the LLM response to extract opportunities with evidence indices."""
+    opportunities = []
+    
+    # Split response into opportunity blocks
+    opportunity_blocks = re.split(r'OPPORTUNITY \d+:', llm_response)[1:]  # Skip first empty element
+    
+    for block in opportunity_blocks:
+        block = block.strip()
+        if not block:
+            continue
+            
+        # Extract IDEA, DESCRIPTION, and SOURCES using regex
+        idea_match = re.search(r'IDEA:\s*(.+?)(?=\nDESCRIPTION:)', block, re.DOTALL)
+        desc_match = re.search(r'DESCRIPTION:\s*(.+?)(?=\nSOURCES:)', block, re.DOTALL)
+        sources_match = re.search(r'SOURCES:\s*(.+?)(?=\n|$)', block, re.DOTALL)
+        
+        if idea_match and desc_match and sources_match:
+            idea = idea_match.group(1).strip()
+            description = desc_match.group(1).strip()
+            sources_text = sources_match.group(1).strip()
+            
+            # Parse source indices
+            supporting_evidence_indices = []
+            try:
+                # Extract numbers from sources text
+                source_numbers = re.findall(r'\d+', sources_text)
+                supporting_evidence_indices = [int(num) for num in source_numbers]
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse source indices from: {sources_text}. Error: {e}")
+                supporting_evidence_indices = []
+            
+            opportunities.append({
+                "idea": idea,
+                "description": description,
+                "supporting_evidence_indices": supporting_evidence_indices
+            })
+        else:
+            logger.warning(f"Failed to parse opportunity block: {block[:100]}...")
+    
+    return opportunities
+
+
 def _search_videos(query: str, limit: int) -> List[Dict]:
     """Use yt-dlp to search YouTube without an API key."""
     ydl_opts = {
         "quiet": True,
         "skip_download": True,
-        "extract_flat": True,
+        "extract_flat": False,  # Changed to False to get more metadata including author
         "noplaylist": True,
     }
     with YoutubeDL(ydl_opts) as ydl:
@@ -43,8 +112,14 @@ def _search_videos(query: str, limit: int) -> List[Dict]:
             continue
         vid = e.get("id") or ""
         title = e.get("title") or ""
+        author = e.get("uploader") or e.get("channel") or ""
         url = e.get("webpage_url") or e.get("url") or (f"https://www.youtube.com/watch?v={vid}" if vid else "")
-        out.append({"video_id": vid, "title": title, "link": url})
+        out.append({
+            "video_id": vid, 
+            "title": title, 
+            "link": url,
+            "author": author
+        })
     return out
 
 
@@ -126,46 +201,73 @@ def _fetch_transcript_text(video_id: str, video_url: str) -> str:
 
 
 def fetch_and_analyze_youtube(topic: str):
+    """
+    Analyze YouTube videos for a given topic and produce enriched JSON output.
+    
+    Args:
+        topic: The research topic to search for on YouTube
+        
+    Returns:
+        None (writes JSON file to output directory)
+    """
     logger.info(f"[YouTube] Topic: {topic} | TopN={TOP_N_YOUTUBE_VIDEOS}")
     results = _search_videos(topic, TOP_N_YOUTUBE_VIDEOS)
-
-    videos = []
-    corpus_parts = []
-
-    for r in results:
+    
+    # Build source evidence list and collect transcripts
+    source_evidence = []
+    video_transcripts = []
+    
+    for idx, r in enumerate(results):
         title = r.get("title", "")
         link = r.get("link", "")
+        author = r.get("author", "")
         vid = r.get("video_id", "")
         transcript = _fetch_transcript_text(vid, link) if vid and link else ""
+        
         if transcript:
-            corpus_parts.append(transcript)
-        videos.append(
-            {
+            # Extract a key quote (first 200 characters of transcript)
+            key_quote = transcript[:200].strip()
+            if len(transcript) > 200:
+                key_quote += "..."
+            
+            source_evidence.append({
+                "index": idx,
+                "source_type": "YouTube",
                 "title": title,
-                "link": link,
-                "video_id": vid,
-                "has_transcript": bool(transcript),
-                "transcript_chars": len(transcript) if transcript else 0,
-            }
-        )
-
-    corpus = "\n\n".join(corpus_parts)
-    chunks = chunk_text(corpus)
-    prompt = (
-        "Summarize the core insights, trends, and actionable opportunities from these "
-        "YouTube transcripts. Output concise bullet points suitable for an Opportunity Brief."
-    )
-    summary = call_llm(prompt, chunks)
-
-    out = {
-        "topic": topic,
-        "source": "youtube",
-        "top_n": TOP_N_YOUTUBE_VIDEOS,
-        "videos": videos,
-        "summary": summary,
-    }
+                "author": author,
+                "url": link,
+                "key_quote": key_quote
+            })
+            
+            # Add transcript with source reference for LLM processing
+            video_transcripts.append(f"[SOURCE {idx}] {title} by {author}\n{transcript}")
+    
+    if not video_transcripts:
+        logger.warning(f"[YouTube] No transcripts found for topic: {topic}")
+        # Return empty structure if no transcripts
+        out = {
+            "synthesized_opportunities": [],
+            "source_evidence": []
+        }
+    else:
+        # Create enhanced prompt for linked opportunities
+        corpus = "\n\n---\n\n".join(video_transcripts)
+        chunks = chunk_text(corpus)
+        
+        prompt = _create_opportunities_prompt(len(source_evidence))
+        llm_response = call_llm(prompt, chunks)
+        
+        # Parse LLM response to extract opportunities with evidence indices
+        synthesized_opportunities = _parse_opportunities_response(llm_response)
+        
+        out = {
+            "synthesized_opportunities": synthesized_opportunities,
+            "source_evidence": source_evidence
+        }
+    
+    # Write output file
     out_path = Path("output") / f"{topic.replace(' ', '_')}_youtube.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2)
-    logger.info(f"[YouTube] Wrote {out_path}")
+    logger.info(f"[YouTube] Wrote {out_path} with {len(out['synthesized_opportunities'])} opportunities and {len(out['source_evidence'])} sources")

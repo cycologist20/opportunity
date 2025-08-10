@@ -1,0 +1,57 @@
+Folder PATH listing for volume Windows-SSD
+Volume serial number is 72C6-8B6D
+C:.
+¦   .env
+¦   .gitignore
+¦   arxiv_module.py
+¦   day1-impl.ps1
+¦   global_rules.md
+¦   patch-modules.ps1
+¦   patch-youtube.ps1
+¦   poetry.lock
+¦   prd.md
+¦   project_tree.txt
+¦   pyproject.toml
+¦   README.md
+¦   requirements.txt
+¦   save.ps1
+¦   youtube_module.py
+¦   
++---archive
+¦       setup-deps.ps1
+¦       setup-missing-deps.ps1
+¦       setup.ps1
+¦       setup2.ps1
+¦       smoke.ps1
+¦       
++---assets
+¦       opportunity_logo.png
+¦       
++---docs
+¦       prd.docx
+¦       
++---ok_mvp
+¦   ¦   arxiv_module.py
+¦   ¦   config.py
+¦   ¦   llm_utils.py
+¦   ¦   logger.py
+¦   ¦   main.py
+¦   ¦   youtube_module.py
+¦   ¦   __init__.py
+¦   ¦   __main__.py
+¦   ¦   
+¦   +---__pycache__
+¦           arxiv_module.cpython-313.pyc
+¦           config.cpython-313.pyc
+¦           llm_utils.cpython-313.pyc
+¦           logger.cpython-313.pyc
+¦           main.cpython-313.pyc
+¦           youtube_module.cpython-313.pyc
+¦           __init__.cpython-313.pyc
+¦           __main__.cpython-313.pyc
+¦           
++---output
+        AI_in_preventative_healthcare_arxiv.json
+        AI_in_preventative_healthcare_youtube.json
+        wearable_tech_for_seniors_youtube.json
+        

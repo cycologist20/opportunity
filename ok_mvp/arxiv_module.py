@@ -1,8 +1,9 @@
 # ok_mvp/arxiv_module.py
 import io
 import json
+import re
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Any
 
 import arxiv
 import requests
@@ -13,6 +14,75 @@ from .config import TOP_N_ARXIV_PAPERS
 from .llm_utils import chunk_text, call_llm
 
 logger = get_logger()
+
+
+def _create_opportunities_prompt(num_sources: int) -> str:
+    """Create a prompt that instructs the LLM to generate opportunities with source references."""
+    return f"""Analyze the following academic paper summaries and identify actionable business opportunities.
+
+Each summary is labeled with [SOURCE X] where X is a number from 0 to {num_sources-1}.
+
+For each opportunity you identify, you MUST:
+1. Provide a clear, concise idea (1-2 sentences)
+2. Provide a detailed description explaining the opportunity (2-3 sentences)
+3. List the specific source numbers that support this opportunity
+
+Format your response EXACTLY as follows:
+
+OPPORTUNITY 1:
+IDEA: [Brief opportunity statement]
+DESCRIPTION: [Detailed explanation of the opportunity]
+SOURCES: [comma-separated list of source numbers, e.g., 0,2,4]
+
+OPPORTUNITY 2:
+IDEA: [Brief opportunity statement]
+DESCRIPTION: [Detailed explanation of the opportunity]
+SOURCES: [comma-separated list of source numbers, e.g., 1,3]
+
+Continue this pattern for all opportunities you identify. Be specific about which sources support each opportunity."""
+
+
+def _parse_opportunities_response(llm_response: str) -> List[Dict[str, Any]]:
+    """Parse the LLM response to extract opportunities with evidence indices."""
+    opportunities = []
+    
+    # Split response into opportunity blocks
+    opportunity_blocks = re.split(r'OPPORTUNITY \d+:', llm_response)[1:]  # Skip first empty element
+    
+    for block in opportunity_blocks:
+        block = block.strip()
+        if not block:
+            continue
+            
+        # Extract IDEA, DESCRIPTION, and SOURCES using regex
+        idea_match = re.search(r'IDEA:\s*(.+?)(?=\nDESCRIPTION:)', block, re.DOTALL)
+        desc_match = re.search(r'DESCRIPTION:\s*(.+?)(?=\nSOURCES:)', block, re.DOTALL)
+        sources_match = re.search(r'SOURCES:\s*(.+?)(?=\n|$)', block, re.DOTALL)
+        
+        if idea_match and desc_match and sources_match:
+            idea = idea_match.group(1).strip()
+            description = desc_match.group(1).strip()
+            sources_text = sources_match.group(1).strip()
+            
+            # Parse source indices
+            supporting_evidence_indices = []
+            try:
+                # Extract numbers from sources text
+                source_numbers = re.findall(r'\d+', sources_text)
+                supporting_evidence_indices = [int(num) for num in source_numbers]
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse source indices from: {sources_text}. Error: {e}")
+                supporting_evidence_indices = []
+            
+            opportunities.append({
+                "idea": idea,
+                "description": description,
+                "supporting_evidence_indices": supporting_evidence_indices
+            })
+        else:
+            logger.warning(f"Failed to parse opportunity block: {block[:100]}...")
+    
+    return opportunities
 
 
 def _search_arxiv(query: str, limit: int) -> List[Dict]:
@@ -61,55 +131,86 @@ def _pdf_to_text(pdf_bytes: bytes) -> str:
 
 
 def fetch_and_analyze_arxiv(topic: str):
+    """
+    Analyze arXiv papers for a given topic and produce enriched JSON output.
+    
+    Args:
+        topic: The research topic to search for on arXiv
+        
+    Returns:
+        None (writes JSON file to output directory)
+    """
     logger.info(f"[arXiv] Topic: {topic} | TopN={TOP_N_ARXIV_PAPERS}")
     entries = _search_arxiv(topic, TOP_N_ARXIV_PAPERS)
 
-    papers = []
-    per_paper_summaries = []
+    # Build source evidence list and collect paper summaries
+    source_evidence = []
+    paper_summaries = []
 
-    for e in entries:
+    for idx, e in enumerate(entries):
         title = getattr(e, "title", "")
         authors = [a.name for a in getattr(e, "authors", [])]
+        pdf_url = getattr(e, "pdf_url", "")
+        
+        # Download and extract text from PDF
         pdf_bytes = _download_pdf_bytes(e)
         text = _pdf_to_text(pdf_bytes)
-        chunks = chunk_text(text)
-        prompt = (
-            "Summarize this paper for a product strategist. Extract problem, methods, "
-            "key findings, and potential business applications."
-        )
-        summary = call_llm(prompt, chunks) if chunks else "No text extracted."
-        per_paper_summaries.append({"title": title, "summary": summary})
-        papers.append(
-            {
+        
+        if text:
+            # Generate individual paper summary
+            chunks = chunk_text(text)
+            prompt = (
+                "Summarize this paper for a product strategist. Extract problem, methods, "
+                "key findings, and potential business applications."
+            )
+            summary = call_llm(prompt, chunks) if chunks else "No text extracted."
+            
+            # Extract key quote from abstract or first part of text
+            key_quote = text[:300].strip()
+            if len(text) > 300:
+                key_quote += "..."
+            
+            # Add to source evidence
+            source_evidence.append({
+                "index": idx,
+                "source_type": "arXiv",
                 "title": title,
                 "authors": authors,
-                "entry_id": getattr(e, "entry_id", ""),
-                "pdf_url": getattr(e, "pdf_url", ""),
-                "extracted_chars": len(text),
-            }
-        )
+                "url": pdf_url,
+                "key_quote": key_quote
+            })
+            
+            # Add summary with source reference for final synthesis
+            paper_summaries.append(f"[SOURCE {idx}] {title} by {', '.join(authors)}\n{summary}")
+        else:
+            logger.warning(f"No text extracted from paper: {title}")
 
-    combined = "\n\n".join(s["summary"] for s in per_paper_summaries if s.get("summary"))
-    final = (
-        call_llm(
-            "Synthesize cross-paper insights into concrete market opportunities and risks. "
-            "Be concise, actionable, and specific.",
-            chunk_text(combined),
-        )
-        if combined
-        else "No summaries produced."
-    )
+    if not paper_summaries:
+        logger.warning(f"[arXiv] No paper summaries generated for topic: {topic}")
+        # Return empty structure if no summaries
+        out = {
+            "synthesized_opportunities": [],
+            "source_evidence": []
+        }
+    else:
+        # Create enhanced prompt for linked opportunities
+        corpus = "\n\n---\n\n".join(paper_summaries)
+        chunks = chunk_text(corpus)
+        
+        prompt = _create_opportunities_prompt(len(source_evidence))
+        llm_response = call_llm(prompt, chunks)
+        
+        # Parse LLM response to extract opportunities with evidence indices
+        synthesized_opportunities = _parse_opportunities_response(llm_response)
+        
+        out = {
+            "synthesized_opportunities": synthesized_opportunities,
+            "source_evidence": source_evidence
+        }
 
-    out = {
-        "topic": topic,
-        "source": "arxiv",
-        "top_n": TOP_N_ARXIV_PAPERS,
-        "papers": papers,
-        "per_paper_summaries": per_paper_summaries,
-        "synthesis": final,
-    }
+    # Write output file
     out_path = Path("output") / f"{topic.replace(' ', '_')}_arxiv.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=2)
-    logger.info(f"[arXiv] Wrote {out_path}")
+    logger.info(f"[arXiv] Wrote {out_path} with {len(out['synthesized_opportunities'])} opportunities and {len(out['source_evidence'])} sources")
