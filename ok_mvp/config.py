@@ -6,10 +6,15 @@ import os
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
 # ------------ YouTube ------------
-TOP_N_YOUTUBE_VIDEOS = int(os.getenv("TOP_N_YOUTUBE_VIDEOS", "10"))
+TOP_N_YOUTUBE_VIDEOS = int(os.getenv("TOP_N_YOUTUBE_VIDEOS", "5"))
 
 # ------------ arXiv --------------
 TOP_N_ARXIV_PAPERS = int(os.getenv("TOP_N_ARXIV_PAPERS", "5"))
+
+# ------------ Podcast ------------
+TOP_N_PODCAST_EPISODES = int(os.getenv("TOP_N_PODCAST_EPISODES", "5"))
+PODCAST_TRANSCRIPT_POLL_INTERVAL = int(os.getenv("PODCAST_TRANSCRIPT_POLL_INTERVAL", "30"))  # seconds
+PODCAST_TRANSCRIPT_TIMEOUT = int(os.getenv("PODCAST_TRANSCRIPT_TIMEOUT", "600"))  # 10 minutes
 
 # ------------ Chunking / Limits ---
 # We estimate ~4 chars per token; add a safety margin. These limits keep us far below 128k tokens.

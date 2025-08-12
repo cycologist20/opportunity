@@ -1,33 +1,29 @@
 # ok_mvp/youtube_module.py
+import asyncio
 import json
 import re
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 import requests
 from yt_dlp import YoutubeDL
-
-# Try to import transcript API symbols, but don't rely on them exclusively
-try:
-    from youtube_transcript_api import (  # type: ignore
-        YouTubeTranscriptApi,
-        TranscriptsDisabled,
-        NoTranscriptFound,
-        VideoUnavailable,
-    )
-except Exception:  # library missing or import issue — we’ll fall back
-    YouTubeTranscriptApi = None  # type: ignore
-    TranscriptsDisabled = NoTranscriptFound = VideoUnavailable = Exception  # type: ignore
+from youtube_transcript_api import (
+    YouTubeTranscriptApi,
+    TranscriptsDisabled,
+    NoTranscriptFound,
+    VideoUnavailable,
+)
 
 from .logger import get_logger
 from .config import TOP_N_YOUTUBE_VIDEOS
-from .llm_utils import chunk_text, call_llm
+from .llm_utils import call_llm, chunk_text
+from .text_utils import vtt_to_text, finalize_text
 
 logger = get_logger()
 
 
 def _create_opportunities_prompt(num_sources: int) -> str:
-    """Create a prompt that instructs the LLM to generate opportunities with source references."""
+    # This function remains unchanged
     return f"""Analyze the following YouTube video transcripts and identify actionable business opportunities.
 
 Each transcript is labeled with [SOURCE X] where X is a number from 0 to {num_sources-1}.
@@ -44,228 +40,179 @@ IDEA: [Brief opportunity statement]
 DESCRIPTION: [Detailed explanation of the opportunity]
 SOURCES: [comma-separated list of source numbers, e.g., 0,2,4]
 
-OPPORTUNITY 2:
-IDEA: [Brief opportunity statement]
-DESCRIPTION: [Detailed explanation of the opportunity]
-SOURCES: [comma-separated list of source numbers, e.g., 1,3]
-
-Continue this pattern for all opportunities you identify. Be specific about which sources support each opportunity."""
+Continue this pattern for all opportunities you identify."""
 
 
-def _parse_opportunities_response(llm_response: str) -> List[Dict]:
-    """Parse the LLM response to extract opportunities with evidence indices."""
+def _parse_opportunities_response(llm_response: str) -> List[Dict[str, Any]]:
+    # This function remains unchanged
     opportunities = []
-    
-    # Split response into opportunity blocks
-    opportunity_blocks = re.split(r'OPPORTUNITY \d+:', llm_response)[1:]  # Skip first empty element
-    
+    opportunity_blocks = re.split(r'OPPORTUNITY \d+:', llm_response)[1:]
     for block in opportunity_blocks:
         block = block.strip()
-        if not block:
-            continue
-            
-        # Extract IDEA, DESCRIPTION, and SOURCES using regex
+        if not block: continue
         idea_match = re.search(r'IDEA:\s*(.+?)(?=\nDESCRIPTION:)', block, re.DOTALL)
         desc_match = re.search(r'DESCRIPTION:\s*(.+?)(?=\nSOURCES:)', block, re.DOTALL)
         sources_match = re.search(r'SOURCES:\s*(.+?)(?=\n|$)', block, re.DOTALL)
-        
         if idea_match and desc_match and sources_match:
             idea = idea_match.group(1).strip()
             description = desc_match.group(1).strip()
             sources_text = sources_match.group(1).strip()
-            
-            # Parse source indices
-            supporting_evidence_indices = []
             try:
-                # Extract numbers from sources text
                 source_numbers = re.findall(r'\d+', sources_text)
                 supporting_evidence_indices = [int(num) for num in source_numbers]
-            except (ValueError, TypeError) as e:
+            except (ValueError, TypeError):
                 logger.warning(f"Failed to parse source indices from: {sources_text}. Error: {e}")
                 supporting_evidence_indices = []
-            
             opportunities.append({
                 "idea": idea,
                 "description": description,
                 "supporting_evidence_indices": supporting_evidence_indices
             })
-        else:
-            logger.warning(f"Failed to parse opportunity block: {block[:100]}...")
-    
     return opportunities
 
+# --- NEW ROBUST TRANSCRIPT LOGIC ---
 
-def _search_videos(query: str, limit: int) -> List[Dict]:
-    """Use yt-dlp to search YouTube without an API key."""
-    ydl_opts = {
-        "quiet": True,
-        "skip_download": True,
-        "extract_flat": False,  # Changed to False to get more metadata including author
-        "noplaylist": True,
-    }
+def _search_videos(query: str, limit: int) -> List[Dict[str, Any]]:
+    """Use yt-dlp to search YouTube and get video metadata."""
+    logger.info(f"[YouTube] Searching for top {limit} videos for query: '{query}'")
+    ydl_opts = {"quiet": True, "skip_download": True, "extract_flat": False, "noplaylist": True}
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
     entries = info.get("entries", []) if isinstance(info, dict) else []
+    
     out = []
     for e in entries:
-        if not isinstance(e, dict):
-            continue
+        if not isinstance(e, dict): continue
         vid = e.get("id") or ""
-        title = e.get("title") or ""
-        author = e.get("uploader") or e.get("channel") or ""
-        url = e.get("webpage_url") or e.get("url") or (f"https://www.youtube.com/watch?v={vid}" if vid else "")
         out.append({
-            "video_id": vid, 
-            "title": title, 
-            "link": url,
-            "author": author
+            "video_id": vid,
+            "title": e.get("title") or vid,
+            "author": e.get("uploader") or e.g_et("channel") or "N/A",
+            "url": e.get("webpage_url") or f"https://www.youtube.com/watch?v={vid}",
+            "raw_info": e # Keep raw info for fallback
         })
+    logger.info(f"[YouTube] Found {len(out)} videos.")
     return out
 
-
-def _clean_vtt_to_text(vtt: str) -> str:
-    """Convert a simple .vtt payload to plain text (best-effort)."""
-    lines = []
-    for line in vtt.splitlines():
-        # drop WEBVTT header, cue timings, and metadata
-        if not line or line.startswith("WEBVTT") or "-->" in line:
-            continue
-        if re.match(r"^\d+$", line.strip()):  # cue index numbers
-            continue
-        # remove common VTT tags like <c>...</c>, <00:00:00.000>
-        line = re.sub(r"<[^>]+>", "", line)
-        line = re.sub(r"\{\\.*?\}", "", line)
-        if line.strip():
-            lines.append(line.strip())
-    return " ".join(lines)
-
-
-def _fetch_vtt_via_ytdlp(video_url: str) -> Optional[str]:
-    """Fallback: ask yt-dlp for auto/subtitle URLs and fetch the VTT."""
-    ydl_opts = {
-        "quiet": True,
-        "skip_download": True,
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-    }
+def _fetch_transcript_from_api(video_id: str) -> Optional[str]:
+    """Primary Method: Use youtube-transcript-api's get_transcript."""
     try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
-        # Prefer English auto-captions, then any language
-        caps = info.get("automatic_captions") or info.get("subtitles") or {}
-        for lang in ("en", "en-US", "en-GB"):
-            if lang in caps and caps[lang]:
-                url = caps[lang][0].get("url")
-                if url:
-                    r = requests.get(url, timeout=30)
-                    if r.status_code == 200 and r.text:
-                        return _clean_vtt_to_text(r.text)
-        # No EN? take first available
-        for _, entries in caps.items():
-            if entries:
-                url = entries[0].get("url")
-                if url:
-                    r = requests.get(url, timeout=30)
-                    if r.status_code == 200 and r.text:
-                        return _clean_vtt_to_text(r.text)
+        # This is the most direct way to get an English transcript
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en', 'en-US', 'en-GB'])
+        text = " ".join([d['text'] for d in transcript_list])
+        logger.debug(f"Successfully fetched transcript via API for {video_id}")
+        return text
+    except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable) as e:
+        logger.warning(f"Transcript unavailable via API for {video_id}: {e}")
+        return None
     except Exception as e:
-        logger.warning(f"yt-dlp caption fetch failed: {e}")
+        logger.error(f"An unexpected error occurred with Transcript API for {video_id}: {e}")
+        return None
+
+def _fetch_transcript_from_vtt(video_info: Dict) -> Optional[str]:
+    """Fallback Method: Use yt-dlp to find and parse VTT caption files."""
+    logger.info(f"Attempting VTT fallback for video ID: {video_info['video_id']}")
+    subs = video_info['raw_info'].get("subtitles") or {}
+    autosubs = video_info['raw_info'].get("automatic_captions") or {}
+    
+    caption_url = None
+    preferred_langs = ['en', 'en-US', 'en-GB']
+    
+    # Logic to find the best VTT url
+    for lang in preferred_langs:
+        if lang in subs and subs[lang]:
+            caption_url = subs[lang][0].get("url")
+            break
+    if not caption_url:
+        for lang in preferred_langs:
+            if lang in autosubs and autosubs[lang]:
+                caption_url = autosubs[lang][0].get("url")
+                break
+    
+    if not caption_url:
+        logger.warning(f"No VTT caption URL found for {video_info['video_id']}")
+        return None
+        
+    try:
+        response = requests.get(caption_url, timeout=30)
+        response.raise_for_status()
+        return vtt_to_text(response.text)
+    except Exception as e:
+        logger.error(f"Failed to download or parse VTT file for {video_info['video_id']}: {e}")
+        return None
+
+async def _get_transcript(video: Dict) -> Optional[str]:
+    """Orchestrates fetching a transcript using a two-level fallback system."""
+    video_id = video.get("video_id")
+    if not video_id:
+        return None
+        
+    # Attempt 1: Primary API
+    transcript = await asyncio.to_thread(_fetch_transcript_from_api, video_id)
+    if transcript:
+        return transcript
+
+    # Attempt 2: VTT Fallback
+    transcript = await asyncio.to_thread(_fetch_transcript_from_vtt, video)
+    if transcript:
+        return transcript
+        
     return None
 
+# --- Main Module Function ---
 
-def _fetch_transcript_text(video_id: str, video_url: str) -> str:
-    """Try youtube-transcript-api first; if unavailable, fall back to yt-dlp auto-captions."""
-    # 1) youtube-transcript-api path (if available)
-    if YouTubeTranscriptApi is not None:
-        try:
-            if hasattr(YouTubeTranscriptApi, "get_transcript"):
-                lines = YouTubeTranscriptApi.get_transcript(video_id, languages=["en", "en-US", "en-GB"])  # type: ignore
-                return " ".join(chunk.get("text", "") for chunk in lines)
-            elif hasattr(YouTubeTranscriptApi, "list_transcripts"):
-                tl = YouTubeTranscriptApi.list_transcripts(video_id)  # type: ignore
-                try:
-                    tr = tl.find_transcript(["en"])
-                except Exception:
-                    tr = next(iter(tl), None)
-                if tr:
-                    lines = tr.fetch()
-                    return " ".join(chunk.get("text", "") for chunk in lines)
-        except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable) as e:
-            logger.warning(f"Transcript unavailable for {video_id}: {e}")
-        except Exception as e:
-            logger.warning(f"Transcript error for {video_id}: {e}")
-
-    # 2) Fallback via yt-dlp captions (VTT)
-    vtt_text = _fetch_vtt_via_ytdlp(video_url)
-    return vtt_text or ""
-
-
-def fetch_and_analyze_youtube(topic: str):
-    """
-    Analyze YouTube videos for a given topic and produce enriched JSON output.
-    
-    Args:
-        topic: The research topic to search for on YouTube
-        
-    Returns:
-        None (writes JSON file to output directory)
-    """
+async def fetch_and_analyze_youtube(topic: str):
     logger.info(f"[YouTube] Topic: {topic} | TopN={TOP_N_YOUTUBE_VIDEOS}")
-    results = _search_videos(topic, TOP_N_YOUTUBE_VIDEOS)
     
-    # Build source evidence list and collect transcripts
+    # Run sync search in an executor to avoid blocking async event loop
+    videos = await asyncio.to_thread(_search_videos, topic, TOP_N_YOUTUBE_VIDEOS)
+    
     source_evidence = []
     video_transcripts = []
+    source_index = 0
     
-    for idx, r in enumerate(results):
-        title = r.get("title", "")
-        link = r.get("link", "")
-        author = r.get("author", "")
-        vid = r.get("video_id", "")
-        transcript = _fetch_transcript_text(vid, link) if vid and link else ""
+    tasks = [_get_transcript(video) for video in videos]
+    transcripts = await asyncio.gather(*tasks)
+
+    for idx, transcript in enumerate(transcripts):
+        video = videos[idx]
+        title = video.get("title", "")
+        logger.info(f"[YouTube] Processing video {idx + 1}/{len(videos)}: '{title}'")
         
-        if transcript:
-            # Extract a key quote (first 200 characters of transcript)
-            key_quote = transcript[:200].strip()
-            if len(transcript) > 200:
-                key_quote += "..."
+        if transcript and transcript.strip():
+            key_quote = transcript[:200].strip() + "..."
             
             source_evidence.append({
-                "index": idx,
+                "index": source_index,
                 "source_type": "YouTube",
                 "title": title,
-                "author": author,
-                "url": link,
+                "author": video.get("author", "N/A"),
+                "url": video.get("url", ""),
                 "key_quote": key_quote
             })
             
-            # Add transcript with source reference for LLM processing
-            video_transcripts.append(f"[SOURCE {idx}] {title} by {author}\n{transcript}")
-    
+            # Use finalize_text for consistent cleaning
+            cleaned_transcript = finalize_text(transcript.splitlines())
+            video_transcripts.append(f"[SOURCE {source_index}] {title} by {video.get('author', 'N/A')}\n{cleaned_transcript}")
+            source_index += 1
+        else:
+            logger.warning(f"[YouTube] No transcript retrieved for video: {title}")
+
     if not video_transcripts:
-        logger.warning(f"[YouTube] No transcripts found for topic: {topic}")
-        # Return empty structure if no transcripts
-        out = {
-            "synthesized_opportunities": [],
-            "source_evidence": []
-        }
+        logger.warning(f"[YouTube] No episode transcripts found for topic: {topic}")
+        out = {"search_topic": topic, "synthesized_opportunities": [], "source_evidence": []}
     else:
-        # Create enhanced prompt for linked opportunities
         corpus = "\n\n---\n\n".join(video_transcripts)
         chunks = chunk_text(corpus)
-        
         prompt = _create_opportunities_prompt(len(source_evidence))
         llm_response = call_llm(prompt, chunks)
-        
-        # Parse LLM response to extract opportunities with evidence indices
         synthesized_opportunities = _parse_opportunities_response(llm_response)
-        
         out = {
+            "search_topic": topic,
             "synthesized_opportunities": synthesized_opportunities,
             "source_evidence": source_evidence
         }
     
-    # Write output file
     out_path = Path("output") / f"{topic.replace(' ', '_')}_youtube.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:

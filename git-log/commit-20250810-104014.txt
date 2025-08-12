@@ -1,0 +1,4 @@
+﻿Commit: Refactor modules for enriched JSON output per PRD v1.1 [2025-08-10 10:40:11]
+Time:   2025-08-10 10:40:11
+Branch: main
+Repo:   https://github.com/cycologist20/opportunity.git
