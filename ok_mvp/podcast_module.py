@@ -14,6 +14,7 @@ from .config import (
     PODCAST_TRANSCRIPT_TIMEOUT,
 )
 from .llm_utils import call_llm, chunk_text
+from .cache_utils import get_from_cache, save_to_cache
 
 logger = get_logger()
 
@@ -133,22 +134,10 @@ class TaddyAPIClient:
         return []
 
     async def get_episode_transcript(self, episode_uuid: str) -> Optional[str]:
-        # Create cache directory if it doesn't exist
-        cache_dir = Path("cache/transcripts")
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        
         # Check cache first
-        cache_file = cache_dir / f"{episode_uuid}.json"
-        if cache_file.exists():
-            try:
-                with open(cache_file, "r", encoding="utf-8") as f:
-                    cached_data = json.load(f)
-                cached_transcript = cached_data.get("transcript", "")
-                if cached_transcript:
-                    logger.info(f"[Podcast] Using cached transcript for {episode_uuid}")
-                    return cached_transcript
-            except Exception as e:
-                logger.warning(f"[Podcast] Failed to read cached transcript for {episode_uuid}: {e}")
+        cached_transcript = get_from_cache("podcast", episode_uuid)
+        if cached_transcript:
+            return cached_transcript
         
         # Cache miss - fetch from API
         graphql_query = """
@@ -174,18 +163,8 @@ class TaddyAPIClient:
                 full_text = " ".join(item.get("text", "") for item in transcript_items)
                 
                 # Save to cache
-                try:
-                    cache_data = {
-                        "episode_uuid": episode_uuid,
-                        "transcript": full_text,
-                        "cached_at": None  # Could add timestamp if needed
-                    }
-                    with open(cache_file, "w", encoding="utf-8") as f:
-                        json.dump(cache_data, f, indent=2)
-                    logger.info(f"[Podcast] Successfully retrieved and cached transcript for {episode_uuid}")
-                except Exception as e:
-                    logger.warning(f"[Podcast] Failed to cache transcript for {episode_uuid}: {e}")
-                
+                save_to_cache("podcast", episode_uuid, full_text)
+                logger.info(f"[Podcast] Successfully retrieved and cached transcript for {episode_uuid}")
                 return full_text
         
         logger.warning(f"[Podcast] No transcript available for episode: {episode_uuid}")

@@ -12,6 +12,7 @@ from pypdf import PdfReader
 from .logger import get_logger
 from .config import TOP_N_ARXIV_PAPERS
 from .llm_utils import chunk_text, call_llm
+from .cache_utils import get_from_cache, save_to_cache
 
 logger = get_logger()
 
@@ -95,6 +96,22 @@ def _search_arxiv(query: str, limit: int) -> List[Dict]:
     return list(search.results())
 
 
+def _get_arxiv_id(entry) -> str:
+    """Extract ArXiv ID from entry for use as cache key."""
+    # ArXiv entries have an entry_id like "http://arxiv.org/abs/2301.12345v1"
+    entry_id = getattr(entry, "entry_id", "")
+    if entry_id:
+        # Extract just the ID part (e.g., "2301.12345v1")
+        import re
+        match = re.search(r'arxiv\.org/abs/(.+)$', entry_id)
+        if match:
+            return match.group(1)
+    
+    # Fallback to title-based ID if entry_id parsing fails
+    title = getattr(entry, "title", "unknown")
+    return title.replace(" ", "_").replace("/", "_")[:50]
+
+
 def _download_pdf_bytes(entry) -> bytes:
     """Download PDF via entry.pdf_url (arxiv 2.x), returning raw bytes."""
     pdf_url = getattr(entry, "pdf_url", "")
@@ -151,10 +168,19 @@ def fetch_and_analyze_arxiv(topic: str):
         title = getattr(e, "title", "")
         authors = [a.name for a in getattr(e, "authors", [])]
         pdf_url = getattr(e, "pdf_url", "")
+        arxiv_id = _get_arxiv_id(e)
         
-        # Download and extract text from PDF
-        pdf_bytes = _download_pdf_bytes(e)
-        text = _pdf_to_text(pdf_bytes)
+        # Check cache first
+        text = get_from_cache("arxiv", arxiv_id)
+        
+        if not text:
+            # Cache miss - download and extract text from PDF
+            pdf_bytes = _download_pdf_bytes(e)
+            text = _pdf_to_text(pdf_bytes)
+            
+            # Save to cache if we got text
+            if text:
+                save_to_cache("arxiv", arxiv_id, text)
         
         if text:
             # Generate individual paper summary

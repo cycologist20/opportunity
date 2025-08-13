@@ -186,7 +186,7 @@ export default function OpportunityKnocksLanding() {
                 <FileText className="w-6 h-6 text-[#39FF14]" />
               </div>
               <h3 className="text-xl font-bold mb-4">Receive Your Opportunity Brief</h3>
-              <p className="text-gray-300">Get a comprehensive, easy-to-read report delivered to your inbox.</p>
+              <p className="text-gray-300">Get a comprehensive, easy-to-read report delivered to your inbox within 48 hours.</p>
             </div>
           </div>
         </div>
@@ -267,13 +267,16 @@ export default function OpportunityKnocksLanding() {
               <h2 className="text-3xl md:text-4xl font-bold mb-4 text-[#F5F5F5]">Get Your Opportunity Brief</h2>
               <div className="text-6xl font-bold text-[#39FF14] mb-4">$99</div>
               <p className="text-xl text-gray-300 mb-8">A one-time purchase. No subscriptions.</p>
+              <p className="text-sm text-gray-400 mt-2">Your personalized report will be delivered within 48 hours.</p>
 
               <Button
                 size="lg"
                 className="bg-[#39FF14] text-black hover:bg-[#39FF14]/90 font-bold text-xl px-12 py-6 h-auto w-full md:w-auto"
                 asChild
               >
-                <Link href="https://buy.stripe.com/your-payment-link">Unlock Your Opportunity Now</Link>
+                <Link href="https://tally.so/r/wdyLqA" target="_blank" rel="noopener noreferrer">
+                  Unlock Your Opportunity Now
+                </Link>
               </Button>
             </CardContent>
           </Card>

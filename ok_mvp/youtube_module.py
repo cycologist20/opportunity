@@ -18,6 +18,7 @@ from .logger import get_logger
 from .config import TOP_N_YOUTUBE_VIDEOS
 from .llm_utils import call_llm, chunk_text
 from .text_utils import vtt_to_text, finalize_text
+from .cache_utils import get_from_cache, save_to_cache
 
 logger = get_logger()
 
@@ -142,19 +143,26 @@ def _fetch_transcript_from_vtt(video_info: Dict) -> Optional[str]:
         return None
 
 async def _get_transcript(video: Dict) -> Optional[str]:
-    """Orchestrates fetching a transcript using a two-level fallback system."""
+    """Orchestrates fetching a transcript using a two-level fallback system with caching."""
     video_id = video.get("video_id")
     if not video_id:
         return None
+    
+    # Check cache first
+    cached_transcript = get_from_cache("youtube", video_id)
+    if cached_transcript:
+        return cached_transcript
         
     # Attempt 1: Primary API
     transcript = await asyncio.to_thread(_fetch_transcript_from_api, video_id)
     if transcript:
+        save_to_cache("youtube", video_id, transcript)
         return transcript
 
     # Attempt 2: VTT Fallback
     transcript = await asyncio.to_thread(_fetch_transcript_from_vtt, video)
     if transcript:
+        save_to_cache("youtube", video_id, transcript)
         return transcript
         
     return None

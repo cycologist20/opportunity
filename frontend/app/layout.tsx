@@ -4,9 +4,14 @@ import { GeistMono } from 'geist/font/mono'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'v0 App',
-  description: 'Created with v0',
+  title: 'Opportunity',
+  description: 'AI-powered business opportunity discovery',
   generator: 'v0.dev',
+  icons: {
+    icon: '/favicon_32x32.png',
+    shortcut: '/favicon_32x32.png',
+    apple: '/favicon_32x32.png',
+  },
 }
 
 export default function RootLayout({
